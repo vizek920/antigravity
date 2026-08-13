@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="لعبة شاركني أو اسرقني - بطولة الخداع والتصويت مع نظام الغرف الأونلاين">
+    <title>شاركني أو اسرقني | Split or Steal Online Rooms</title>
+    
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Amiri:ital,wght@0,400;0,700;1,400&family=Tajawal:wght@300;400;500;700;800;900&display=swap" rel="stylesheet">
+    
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <!-- PeerJS WebRTC CDN -->
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+
+    <!-- Custom CSS -->
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+    <!-- Animated Stars Canvas -->
+    <canvas id="bg-canvas"></canvas>
+    
+    <!-- Decorative Gold Top Line -->
+    <div class="top-gold-bar"></div>
+
+    <!-- Main Header -->
+    <header class="app-header">
+        <div class="logo-area">
+            <i class="fa-solid fa-vault logo-icon"></i>
+            <h1 class="game-title">شاركني <span class="accent">أو</span> اسرقني</h1>
+        </div>
+        <div class="header-actions">
+            <button id="btn-admin-modal" class="btn-secondary">
+                <i class="fa-solid fa-sliders"></i> لوحة المنظّم
+            </button>
+            <button id="btn-sound-toggle" class="btn-icon" title="كتم/تشغيل الصوت">
+                <i class="fa-solid fa-volume-high"></i>
+            </button>
+        </div>
+    </header>
+
+    <!-- Main Container -->
+    <main class="main-container">
+
+        <!-- STEP 1: MODE SELECTOR & ROOM CREATION -->
+        <section id="step-setup" class="game-step active">
+            <div class="glass-card setup-card">
+                
+                <!-- Mode Navigation Tabs -->
+                <div class="mode-tabs">
+                    <button class="tab-btn active" data-tab="tab-host">
+                        <i class="fa-solid fa-tower-broadcast"></i> إنشاء غرفة (الهوست)
+                    </button>
+                    <button class="tab-btn" data-tab="tab-join">
+                        <i class="fa-solid fa-mobile-screen-button"></i> انضمام لغرفة (من الجوال)
+                    </button>
+                    <button class="tab-btn" data-tab="tab-local">
+                        <i class="fa-solid fa-desktop"></i> لعب محلي (شاشة واحدة)
+                    </button>
+                </div>
+
+                <!-- TAB 1: HOST ONLINE ROOM -->
+                <div id="tab-host" class="tab-content active">
+                    <div class="card-header">
+                        <h2><i class="fa-solid fa-crown"></i> إنشاء غرفة أونلاين جديدة</h2>
+                        <p>أنشئ غرفة ليتصل بك المتنافسون من جوالاتهم باستخدام كود الغرفة</p>
+                    </div>
+
+                    <div class="host-room-init-box">
+                        <button id="btn-create-online-room" class="btn-gold btn-large">
+                            <i class="fa-solid fa-plus"></i> إنشـاء كود الغرفة الآن
+                        </button>
+                    </div>
+
+                    <div id="host-room-active-info" class="room-created-info hidden">
+                        <div class="room-code-badge-container">
+                            <span class="code-lbl">كود الغرفة المباشر:</span>
+                            <strong class="code-val" id="disp-room-code">----</strong>
+                            <button id="btn-copy-code" class="btn-icon btn-sm" title="نسخ الكود"><i class="fa-solid fa-copy"></i></button>
+                        </div>
+
+                        <div class="connected-players-list">
+                            <div class="c-player-card" id="slot-p1">
+                                <i class="fa-solid fa-user-ninja"></i>
+                                <span class="c-status">المتنافس الأول: <strong id="name-p1-slot">في انتظار الانضمام...</strong></span>
+                            </div>
+                            <div class="c-player-card" id="slot-p2">
+                                <i class="fa-solid fa-user-tie"></i>
+                                <span class="c-status">المتنافس الثاني: <strong id="name-p2-slot">في انتظار الانضمام...</strong></span>
+                            </div>
+                        </div>
+
+                        <button id="btn-host-start-online-game" class="btn-primary btn-large" disabled>
+                            <i class="fa-solid fa-play"></i> بدء سحب الكروت (بعد اكتمال اللاعبين)
+                        </button>
+                    </div>
+                </div>
+
+                <!-- TAB 2: PLAYER JOIN ROOM -->
+                <div id="tab-join" class="tab-content">
+                    <div class="card-header">
+                        <h2><i class="fa-solid fa-right-to-bracket"></i> الانضمام لغرفة أونلاين</h2>
+                        <p>أدخل كود الغرفة الظاهر على شاشة الهوست واسمك للبدء</p>
+                    </div>
+
+                    <div class="join-form-grid">
+                        <div class="input-group">
+                            <label for="join-room-code-input"><i class="fa-solid fa-key"></i> كود الغرفة (4 أرقام)</label>
+                            <input type="text" id="join-room-code-input" placeholder="مثال: 7842" maxlength="6">
+                        </div>
+                        <div class="input-group">
+                            <label for="join-player-name-input"><i class="fa-solid fa-user"></i> اسمك في البطولة</label>
+                            <input type="text" id="join-player-name-input" placeholder="أدخل اسمك هنا">
+                        </div>
+                    </div>
+
+                    <button id="btn-join-room-action" class="btn-primary btn-large">
+                        <i class="fa-solid fa-plug"></i> الانضمام للغرفة الآن
+                    </button>
+
+                    <div id="join-status-msg" class="join-status-banner hidden">
+                        جاري الاتصال بروم الهوست...
+                    </div>
+                </div>
+
+                <!-- TAB 3: LOCAL PASS & PLAY -->
+                <div id="tab-local" class="tab-content">
+                    <div class="card-header">
+                        <h2><i class="fa-solid fa-users"></i> إعداد اللعب المحلي (بدون إنترنت)</h2>
+                        <p>تُدار اللعبة بالكامل من نفس الجهاز</p>
+                    </div>
+                    
+                    <div class="players-input-grid">
+                        <div class="input-group p1-group">
+                            <label for="p1-name-local"><i class="fa-solid fa-user-ninja"></i> المتنافس الأول</label>
+                            <input type="text" id="p1-name-local" value="المتنافس 1">
+                        </div>
+                        <div class="vs-badge">VS</div>
+                        <div class="input-group p2-group">
+                            <label for="p2-name-local"><i class="fa-solid fa-user-tie"></i> المتنافس الثاني</label>
+                            <input type="text" id="p1-name-local2" id="p2-name-local" value="المتنافس 2">
+                        </div>
+                    </div>
+
+                    <button id="btn-start-local-game" class="btn-primary btn-large">
+                        <i class="fa-solid fa-play"></i> بدء اللعب المحلي
+                    </button>
+                </div>
+
+            </div>
+        </section>
+
+        <!-- STEP 2: 20 CARDS SELECTION -->
+        <section id="step-selection" class="game-step">
+            <!-- Game Status Bar -->
+            <div class="status-bar">
+                <div class="player-indicator p1-indicator active-turn" id="ind-p1">
+                    <span class="p-name" id="disp-p1-name">المتنافس 1</span>
+                    <span class="p-picks">الكروت المختارة: <strong id="p1-picks-count">0/3</strong></span>
+                </div>
+                <div class="pot-tracker">
+                    <span class="pot-label">الخزنة الحالية</span>
+                    <span class="pot-amount" id="disp-running-pot">0</span>
+                    <span class="pot-unit">نقطة</span>
+                </div>
+                <div class="player-indicator p2-indicator" id="ind-p2">
+                    <span class="p-name" id="disp-p2-name">المتنافس 2</span>
+                    <span class="p-picks">الكروت المختارة: <strong id="p2-picks-count">0/3</strong></span>
+                </div>
+            </div>
+
+            <div class="turn-prompt-banner" id="turn-prompt-text">
+                دور <span class="highlight-player" id="current-turn-player-name">المتنافس 1</span> لاختيار الكرت 1 من 3
+            </div>
+
+            <!-- 20 Cards Grid -->
+            <div class="cards-grid" id="cards-grid-20">
+                <!-- Dynamically generated 20 cards -->
+            </div>
+
+            <div class="selection-actions">
+                <button id="btn-proceed-to-host-approval" class="btn-primary btn-large" disabled>
+                    <i class="fa-solid fa-shield-halved"></i> للانتقال لمرحلة موافقة الهوست وكشف الكروت (6/6)
+                </button>
+            </div>
+        </section>
+
+        <!-- STEP 3: HOST SUSPENSE & CARD REVEAL STAGE -->
+        <section id="step-host-reveal" class="game-step">
+            <div class="host-stage-header">
+                <h2><i class="fa-solid fa-mask"></i> مرحلة موافقة الهوست والتشويق</h2>
+                <p>الكروت الـ 6 المختارة جاهزة. الهوست فقط يملك صلاحية ترخيص وكشف كل كرت!</p>
+            </div>
+
+            <!-- Pot Banner -->
+            <div class="live-pot-box">
+                <div class="pot-header-title">المجموع التراكمي للخزنة الحالية</div>
+                <div class="pot-counter-display" id="host-stage-pot">0</div>
+                <div id="killer-alert-banner" class="killer-alert hidden">
+                    <i class="fa-solid fa-skull-crossbones"></i> تم كشف كرت القاتل! تصفّرت الخزنة وتراجعت إلى 0!
+                </div>
+            </div>
+
+            <!-- 6 Selected Cards Stage Deck -->
+            <div class="selected-cards-stage" id="selected-cards-stage-container">
+                <!-- 6 Cards rendered here with Host control over each card -->
+            </div>
+
+            <!-- Host Main Controller Dock -->
+            <div class="host-control-dock">
+                <div class="host-status-info">
+                    <span id="host-action-status">الكروت في انتظار ترخيص الهوست...</span>
+                </div>
+                <div class="host-btn-group">
+                    <button id="btn-host-heartbeat-toggle" class="btn-warning">
+                        <i class="fa-solid fa-heart-pulse"></i> صوت التوتر والقلب
+                    </button>
+                    <button id="btn-host-reveal-next" class="btn-gold btn-large">
+                        <i class="fa-solid fa-key"></i> موافقة وكشف الكرت التالي
+                    </button>
+                    <button id="btn-goto-showdown" class="btn-primary btn-large hidden">
+                        <i class="fa-solid fa-handshake-simple"></i> الانتقال للقرار النهائي (شاركني أو اسرقني)
+                    </button>
+                </div>
+            </div>
+        </section>
+
+        <!-- STEP 4: THE FINAL SHOWDOWN (SPLIT OR STEAL) -->
+        <section id="step-showdown" class="game-step">
+            <div class="showdown-hero-banner">
+                <div class="showdown-title">القرار النهائي الحاسِم</div>
+                <div class="final-pot-banner">
+                    <span>قيمة الخزنة الكلية:</span>
+                    <strong id="final-pot-value">1550</strong>
+                    <span>نقطة</span>
+                </div>
+            </div>
+
+            <div class="showdown-players-container">
+                <!-- Player 1 Choice Box -->
+                <div class="player-showdown-box p1-box" id="p1-showdown-box">
+                    <h3 id="showdown-p1-title">المتنافس 1</h3>
+                    <div class="choice-status-badge" id="p1-choice-status">في انتظار الاختيار السري...</div>
+                    <div class="secret-choice-buttons" id="p1-showdown-btns">
+                        <button class="btn-choice btn-split" data-player="1" data-choice="split">
+                            <i class="fa-solid fa-handshake"></i> شاركني (Split)
+                        </button>
+                        <button class="btn-choice btn-steal" data-player="1" data-choice="steal">
+                            <i class="fa-solid fa-user-ninja"></i> اسرقني (Steal)
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Host Countdown Center Divider -->
+                <div class="showdown-center-divider">
+                    <div class="vs-text">ضد</div>
+                    <button id="btn-host-trigger-final-reveal" class="btn-gold btn-large" disabled>
+                        <i class="fa-solid fa-bolt"></i> إطلاق الكشف النهائي بموافقة الهوست
+                    </button>
+                    <div class="countdown-timer-display hidden" id="final-countdown-num">3</div>
+                </div>
+
+                <!-- Player 2 Choice Box -->
+                <div class="player-showdown-box p2-box" id="p2-showdown-box">
+                    <h3 id="showdown-p2-title">المتنافس 2</h3>
+                    <div class="choice-status-badge" id="p2-choice-status">في انتظار الاختيار السري...</div>
+                    <div class="secret-choice-buttons" id="p2-showdown-btns">
+                        <button class="btn-choice btn-split" data-player="2" data-choice="split">
+                            <i class="fa-solid fa-handshake"></i> شاركني (Split)
+                        </button>
+                        <button class="btn-choice btn-steal" data-player="2" data-choice="steal">
+                            <i class="fa-solid fa-user-ninja"></i> اسرقني (Steal)
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Result Overlay Section -->
+            <div id="showdown-result-box" class="showdown-result-card hidden">
+                <div class="result-icon-banner" id="result-icon">
+                    <i class="fa-solid fa-trophy"></i>
+                </div>
+                <h2 id="result-headline">النتيجة النهائية</h2>
+                <p id="result-subtext">تفاصيل توزيع الخزنة</p>
+
+                <div class="result-details-grid">
+                    <div class="p-result-card" id="res-p1-card">
+                        <span class="r-name" id="res-p1-name">المتنافس 1</span>
+                        <span class="r-choice-badge" id="res-p1-choice-text">شاركني</span>
+                        <span class="r-score" id="res-p1-score">+775 نقطة</span>
+                    </div>
+                    <div class="p-result-card" id="res-p2-card">
+                        <span class="r-name" id="res-p2-name">المتنافس 2</span>
+                        <span class="r-choice-badge" id="res-p2-choice-text">شاركني</span>
+                        <span class="r-score" id="res-p2-score">+775 نقطة</span>
+                    </div>
+                </div>
+
+                <div class="result-actions">
+                    <button id="btn-restart-new-game" class="btn-primary btn-large">
+                        <i class="fa-solid fa-rotate-right"></i> بدء مباراة جولة جديدة
+                    </button>
+                </div>
+            </div>
+        </section>
+
+    </main>
+
+    <!-- ORGANIZER ADMIN MODAL -->
+    <div id="modal-admin" class="modal-overlay">
+        <div class="modal-container glass-card">
+            <div class="modal-header">
+                <h2><i class="fa-solid fa-sliders"></i> لوحة تحكم المنظّم (20 كرت)</h2>
+                <button class="btn-close-modal" id="btn-close-admin-modal">&times;</button>
+            </div>
+            
+            <div class="modal-body">
+                <p class="modal-intro">
+                    يمكنك هنا تحديد قيم الـ 20 كرت قبل بدء البطولة، أو تعيين كروت "القاتل / التصفير".
+                </p>
+
+                <div class="admin-quick-presets">
+                    <button id="btn-preset-default" class="btn-secondary btn-sm">
+                        <i class="fa-solid fa-rotate"></i> التوزيع القياسي المتوازن
+                    </button>
+
+                    <button id="btn-preset-high-stakes" class="btn-secondary btn-sm">
+                        <i class="fa-solid fa-fire"></i> إعداد المبالغ الضخمة
+                    </button>
+
+                    <button id="btn-preset-randomize" class="btn-secondary btn-sm">
+                        <i class="fa-solid fa-shuffle"></i> خلط عشوائي لقيم الكروت
+                    </button>
+                </div>
+
+                <div class="admin-cards-config-grid" id="admin-cards-inputs-container">
+                    <!-- 20 Card Inputs generated via JS -->
+                </div>
+            </div>
+
+            <div class="modal-footer">
+                <button id="btn-save-admin-config" class="btn-gold">
+                    <i class="fa-solid fa-floppy-disk"></i> حفظ القيم واعتماها للبطولة
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Notification -->
+    <div id="toast" class="toast-notification"></div>
+
+    <!-- Custom App JS -->
+    <script src="app.js"></script>
+</body>
+</html>
