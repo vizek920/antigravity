@@ -1,848 +1,857 @@
 /* ==========================================================================
-   GAME ENGINE: SHARIKNI OR ASRIQNI (SPLIT OR STEAL) WITH PEERJS ONLINE ROOMS
+   GAME ENGINE: شاركني أو اسرقني — الخزنة السرية
+   Complete rewrite with new UI, alternating picks, hidden cards, PeerJS
    ========================================================================== */
 
 document.addEventListener('DOMContentLoaded', () => {
 
-    // ==========================================
-    // 1. STATE & CONSTANTS
-    // ==========================================
-    const DEFAULT_CARDS_20 = [
-        20, 30, 50, 100, 200, 
-        "القاتل", 500, 1000, 50, 150, 
-        300, 750, "القاتل", 1500, 10, 
+    // ══════════════════════════════════════════════════════════════
+    // 1. CONSTANTS & STATE
+    // ══════════════════════════════════════════════════════════════
+    const DEFAULT_CARDS = [
+        20, 30, 50, 100, 200,
+        'قاتل', 500, 1000, 50, 150,
+        300, 750, 'قاتل', 1500, 10,
         40, 80, 250, 600, 1200
     ];
 
-    let gameState = {
-        cardsConfig: [...DEFAULT_CARDS_20],
-        players: {
-            p1: { name: "المتنافس 1", picks: [], conn: null },
-            p2: { name: "المتنافس 2", picks: [], conn: null }
-        },
-        mode: 'local', // 'host', 'client', 'local'
+    let state = {
+        cardsConfig: [...DEFAULT_CARDS],
+        mode: 'local',      // 'host' | 'client' | 'local'
+        myRole: 'host',     // 'host' | 'p1' | 'p2'
         roomCode: '',
-        myRole: 'host', // 'host', 'p1', 'p2', 'spectator'
+        players: {
+            p1: { name: 'المتنافس 1', picks: [], conn: null },
+            p2: { name: 'المتنافس 2', picks: [], conn: null }
+        },
         currentTurn: 'p1',
-        selectedCardsOrder: [], // Array of { cardIndex, owner, val }
-        currentRevealStageIndex: 0,
+        selectedOrder: [],  // [{cardIdx, owner, val}, ...]
+        revealIdx: 0,
         runningPot: 0,
         showdownChoices: { p1: null, p2: null },
-        soundEnabled: true,
-        heartbeatActive: false
+        soundOn: true,
+        heartbeat: false
     };
 
-    // PeerJS Networking Handles
     let peer = null;
-    let hostConn = null; // Client connection to host
-    let peerConnections = []; // Host connections list
+    let hostConn = null;
+    let peerConns = [];
 
-    // ==========================================
-    // 2. AUDIO SYNTHESIZER (WEB AUDIO API)
-    // ==========================================
+    // ══════════════════════════════════════════════════════════════
+    // 2. SCREEN NAVIGATION
+    // ══════════════════════════════════════════════════════════════
+    function goTo(screenId) {
+        document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+        const el = document.getElementById(screenId);
+        if (el) { el.classList.add('active'); window.scrollTo({ top: 0, behavior: 'smooth' }); }
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // 3. TOAST
+    // ══════════════════════════════════════════════════════════════
+    function toast(msg) {
+        const t = document.getElementById('toast');
+        t.textContent = msg;
+        t.classList.add('show');
+        clearTimeout(t._timer);
+        t._timer = setTimeout(() => t.classList.remove('show'), 2800);
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // 4. AUDIO (Web Audio API)
+    // ══════════════════════════════════════════════════════════════
     let audioCtx = null;
-    let heartbeatInterval = null;
+    let heartbeatTimer = null;
 
     function initAudio() {
-        if (!audioCtx) {
-            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        }
-        if (audioCtx.state === 'suspended') {
-            audioCtx.resume();
-        }
+        if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        if (audioCtx.state === 'suspended') audioCtx.resume();
     }
 
-    function playTone(freq, duration, type = 'sine', gainVal = 0.1) {
-        if (!gameState.soundEnabled) return;
+    function tone(freq, dur, type = 'sine', vol = 0.1) {
+        if (!state.soundOn) return;
         try {
             initAudio();
-            const osc = audioCtx.createOscillator();
-            const gain = audioCtx.createGain();
-            osc.type = type;
-            osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
-            gain.gain.setValueAtTime(gainVal, audioCtx.currentTime);
-            gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + duration);
-            osc.connect(gain);
-            gain.connect(audioCtx.destination);
-            osc.start();
-            osc.stop(audioCtx.currentTime + duration);
-        } catch (e) {}
+            const o = audioCtx.createOscillator();
+            const g = audioCtx.createGain();
+            o.type = type; o.frequency.setValueAtTime(freq, audioCtx.currentTime);
+            g.gain.setValueAtTime(vol, audioCtx.currentTime);
+            g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + dur);
+            o.connect(g); g.connect(audioCtx.destination);
+            o.start(); o.stop(audioCtx.currentTime + dur);
+        } catch(e) {}
     }
 
-    function playClickSound() { playTone(600, 0.08, 'triangle', 0.08); }
-    function playCardSelectSound() { playTone(400, 0.1, 'sine', 0.15); setTimeout(() => playTone(800, 0.12, 'sine', 0.15), 50); }
-    function playCardFlipSound() { playTone(300, 0.15, 'sine', 0.2); setTimeout(() => playTone(600, 0.2, 'triangle', 0.2), 80); }
-    function playPointsGainSound() { [523.25, 659.25, 783.99, 1046.50].forEach((freq, idx) => setTimeout(() => playTone(freq, 0.18, 'sine', 0.2), idx * 70)); }
-    
-    function playKillerExplosionSound() {
-        if (!gameState.soundEnabled) return;
-        try {
-            initAudio();
-            const osc = audioCtx.createOscillator();
-            const gain = audioCtx.createGain();
-            osc.type = 'sawtooth';
-            osc.frequency.setValueAtTime(150, audioCtx.currentTime);
-            osc.frequency.exponentialRampToValueAtTime(30, audioCtx.currentTime + 0.6);
-            gain.gain.setValueAtTime(0.4, audioCtx.currentTime);
-            gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.6);
-            osc.connect(gain);
-            gain.connect(audioCtx.destination);
-            osc.start();
-            osc.stop(audioCtx.currentTime + 0.6);
-        } catch (e) {}
-    }
+    const snd = {
+        click:  () => tone(600, 0.08, 'triangle', 0.07),
+        pick:   () => { tone(400, 0.1, 'sine', 0.14); setTimeout(() => tone(800, 0.12, 'sine', 0.14), 50); },
+        flip:   () => { tone(300, 0.15, 'sine', 0.18); setTimeout(() => tone(600, 0.2, 'triangle', 0.18), 80); },
+        points: () => [523, 659, 784, 1047].forEach((f,i) => setTimeout(() => tone(f, 0.18, 'sine', 0.18), i*70)),
+        killer: () => { initAudio(); try { const o = audioCtx.createOscillator(), g = audioCtx.createGain(); o.type='sawtooth'; o.frequency.setValueAtTime(150, audioCtx.currentTime); o.frequency.exponentialRampToValueAtTime(30, audioCtx.currentTime+0.6); g.gain.setValueAtTime(0.4, audioCtx.currentTime); g.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime+0.6); o.connect(g); g.connect(audioCtx.destination); o.start(); o.stop(audioCtx.currentTime+0.6); } catch(e) {} },
+        fanfare:() => [440,554,659,880,1109].forEach((f,i) => setTimeout(() => tone(f, 0.3, 'triangle', 0.22), i*100)),
+        beep:   () => tone(500, 0.15, 'sine', 0.18)
+    };
 
-    function playShowdownFanfareSound() {
-        [440, 554.37, 659.25, 880, 1108.73].forEach((freq, idx) => setTimeout(() => playTone(freq, 0.3, 'triangle', 0.25), idx * 100));
-    }
-
-    function toggleHeartbeatSound(forceState) {
-        if (typeof forceState === 'boolean') {
-            gameState.heartbeatActive = forceState;
-        } else {
-            gameState.heartbeatActive = !gameState.heartbeatActive;
-        }
-
-        const btnHeartbeat = document.getElementById('btn-host-heartbeat-toggle');
-        if (!btnHeartbeat) return;
-        
-        if (gameState.heartbeatActive) {
-            btnHeartbeat.classList.add('btn-danger');
-            btnHeartbeat.innerHTML = '<i class="fa-solid fa-heart-circle-bolt"></i> إيقاف صوت التوتر';
-            if (!heartbeatInterval) {
-                heartbeatInterval = setInterval(() => {
-                    playTone(80, 0.12, 'sine', 0.25);
-                    setTimeout(() => playTone(60, 0.15, 'sine', 0.2), 180);
+    function setHeartbeat(on) {
+        state.heartbeat = on;
+        const btn = document.getElementById('btn-heartbeat-toggle');
+        if (on) {
+            btn.classList.add('active-heartbeat');
+            btn.innerHTML = '<i class="fa-solid fa-heart-circle-bolt"></i> إيقاف التوتر';
+            if (!heartbeatTimer) {
+                heartbeatTimer = setInterval(() => {
+                    tone(80, 0.12, 'sine', 0.22);
+                    setTimeout(() => tone(60, 0.15, 'sine', 0.18), 180);
                 }, 1000);
             }
         } else {
-            btnHeartbeat.classList.remove('btn-danger');
-            btnHeartbeat.innerHTML = '<i class="fa-solid fa-heart-pulse"></i> صوت التوتر والقلب';
-            if (heartbeatInterval) {
-                clearInterval(heartbeatInterval);
-                heartbeatInterval = null;
-            }
+            btn.classList.remove('active-heartbeat');
+            btn.innerHTML = '<i class="fa-solid fa-heart-pulse"></i> صوت التوتر';
+            if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
         }
     }
 
-    document.getElementById('btn-sound-toggle').addEventListener('click', () => {
-        gameState.soundEnabled = !gameState.soundEnabled;
-        const icon = document.getElementById('btn-sound-toggle').querySelector('i');
-        if (gameState.soundEnabled) {
-            icon.className = 'fa-solid fa-volume-high';
-            showToast("تم تشغيل الصوت");
-        } else {
-            icon.className = 'fa-solid fa-volume-xmark';
-            showToast("تم كتم الصوت");
-        }
+    document.getElementById('btn-sound').addEventListener('click', () => {
+        snd.click();
+        state.soundOn = !state.soundOn;
+        const ico = document.querySelector('#btn-sound i');
+        ico.className = state.soundOn ? 'fa-solid fa-volume-high' : 'fa-solid fa-volume-xmark';
+        toast(state.soundOn ? 'الصوت مفعّل' : 'الصوت مكتوم');
     });
 
-    // ==========================================
-    // 3. BACKGROUND CANVAS
-    // ==========================================
-    const canvas = document.getElementById('bg-canvas');
-    const ctx = canvas.getContext('2d');
-    let particles = [];
-
-    function resizeCanvas() {
-        canvas.width = window.innerWidth;
-        canvas.height = window.innerHeight;
-    }
-    window.addEventListener('resize', resizeCanvas);
-    resizeCanvas();
-
-    class Particle {
-        constructor() { this.reset(); }
-        reset() {
-            this.x = Math.random() * canvas.width;
-            this.y = Math.random() * canvas.height;
-            this.size = Math.random() * 2.5 + 0.5;
-            this.speedY = Math.random() * 0.4 - 0.2;
-            this.speedX = Math.random() * 0.4 - 0.2;
-            this.opacity = Math.random() * 0.5 + 0.2;
-        }
-        update() {
-            this.x += this.speedX;
-            this.y += this.speedY;
-            if (this.x < 0 || this.x > canvas.width || this.y < 0 || this.y > canvas.height) this.reset();
-        }
-        draw() {
-            ctx.fillStyle = `rgba(240, 201, 106, ${this.opacity})`;
-            ctx.beginPath();
-            ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
-            ctx.fill();
-        }
-    }
-
-    for (let i = 0; i < 45; i++) particles.push(new Particle());
-    function animateParticles() {
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        particles.forEach(p => { p.update(); p.draw(); });
-        requestAnimationFrame(animateParticles);
-    }
-    animateParticles();
-
-    // ==========================================
-    // 4. UI STEP NAVIGATION & TABS
-    // ==========================================
-    function showStep(stepId) {
-        document.querySelectorAll('.game-step').forEach(sec => sec.classList.remove('active'));
-        const target = document.getElementById(stepId);
-        if (target) {
-            target.classList.add('active');
-            window.scrollTo({ top: 0, behavior: 'smooth' });
-        }
-    }
-
-    function showToast(msg) {
-        const toast = document.getElementById('toast');
-        toast.textContent = msg;
-        toast.classList.add('show');
-        setTimeout(() => toast.classList.remove('show'), 2800);
-    }
-
-    // Setup Tabs
-    document.querySelectorAll('.tab-btn').forEach(btn => {
-        btn.addEventListener('click', () => {
-            playClickSound();
-            document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-            document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-            btn.classList.add('active');
-            document.getElementById(btn.dataset.tab).classList.add('active');
-        });
+    // ══════════════════════════════════════════════════════════════
+    // 5. LANDING SCREEN
+    // ══════════════════════════════════════════════════════════════
+    document.getElementById('btn-go-host').addEventListener('click', () => {
+        snd.click(); goTo('screen-host-lobby');
     });
 
-    // ==========================================
-    // 5. PEERJS ONLINE MULTIPLAYER ROOM ENGINE
-    // ==========================================
-    
-    // TAB 1: Host Room Creation
-    document.getElementById('btn-create-online-room').addEventListener('click', () => {
-        playClickSound();
+    document.getElementById('btn-go-join').addEventListener('click', () => {
+        snd.click(); goTo('screen-join');
+    });
+
+    document.getElementById('btn-go-local').addEventListener('click', () => {
+        snd.click(); goTo('screen-local');
+    });
+
+    // Back buttons
+    document.getElementById('btn-back-from-host-lobby').addEventListener('click', () => {
+        snd.click(); goTo('screen-landing');
+    });
+    document.getElementById('btn-back-from-join').addEventListener('click', () => {
+        snd.click(); goTo('screen-landing');
+    });
+    document.getElementById('btn-back-from-local').addEventListener('click', () => {
+        snd.click(); goTo('screen-landing');
+    });
+
+    // ══════════════════════════════════════════════════════════════
+    // 6. HOST LOBBY
+    // ══════════════════════════════════════════════════════════════
+    document.getElementById('btn-create-room-action').addEventListener('click', () => {
+        snd.click();
         const code = Math.floor(1000 + Math.random() * 9000).toString();
-        gameState.roomCode = code;
-        gameState.mode = 'host';
-        gameState.myRole = 'host';
+        state.roomCode = code;
+        state.mode = 'host';
+        state.myRole = 'host';
 
         document.getElementById('disp-room-code').textContent = code;
-        document.getElementById('host-room-active-info').classList.remove('hidden');
-        document.getElementById('btn-create-online-room').classList.add('hidden');
+        document.getElementById('watch-code-disp').textContent = `الغرفة: ${code}`;
+        document.getElementById('host-pre-create').style.display = 'none';
+        document.getElementById('host-room-live').style.display = 'block';
 
-        // Init Host Peer
-        const peerId = `sos-room-${code}`;
-        peer = new Peer(peerId);
-
-        peer.on('open', (id) => {
-            showToast(`تم إنشاء الغرفة الكود: ${code}`);
-        });
-
+        // Init PeerJS host
+        peer = new Peer(`sos-vault-${code}`);
+        peer.on('open', () => toast(`✅ الغرفة جاهزة! الكود: ${code}`));
         peer.on('connection', (conn) => {
-            peerConnections.push(conn);
-
-            conn.on('data', (data) => {
-                handleHostReceivedData(data, conn);
-            });
-
-            conn.on('open', () => {
-                showToast("متنافس جديد انضم للغرفة!");
-            });
+            peerConns.push(conn);
+            conn.on('open', () => toast('متنافس جديد انضم للغرفة!'));
+            conn.on('data', (data) => handleHostData(data, conn));
         });
-
-        peer.on('error', (err) => {
-            console.error("Peer Error:", err);
-            showToast("تعذر إنشاء الغرفة بنفس الكود، جرب كود آخر");
-        });
+        peer.on('error', () => toast('خطأ في إنشاء الغرفة، جرب كوداً آخر'));
     });
 
     document.getElementById('btn-copy-code').addEventListener('click', () => {
-        playClickSound();
-        navigator.clipboard.writeText(gameState.roomCode);
-        showToast("تم نسخ كود الغرفة إلى الحافظة!");
+        navigator.clipboard.writeText(state.roomCode).then(() => toast('تم نسخ الكود ✓'));
     });
 
-    function handleHostReceivedData(data, conn) {
-        if (data.type === 'JOIN_REQUEST') {
-            if (!gameState.players.p1.conn) {
-                gameState.players.p1.name = data.playerName || "المتنافس 1";
-                gameState.players.p1.conn = conn;
-                document.getElementById('name-p1-slot').textContent = gameState.players.p1.name;
-                conn.send({ type: 'JOIN_ACCEPTED', role: 'p1', p1Name: gameState.players.p1.name, p2Name: gameState.players.p2.name });
-            } else if (!gameState.players.p2.conn) {
-                gameState.players.p2.name = data.playerName || "المتنافس 2";
-                gameState.players.p2.conn = conn;
-                document.getElementById('name-p2-slot').textContent = gameState.players.p2.name;
-                conn.send({ type: 'JOIN_ACCEPTED', role: 'p2', p1Name: gameState.players.p1.name, p2Name: gameState.players.p2.name });
-                document.getElementById('btn-host-start-online-game').disabled = false;
+    function handleHostData(data, conn) {
+        if (data.type === 'JOIN') {
+            if (!state.players.p1.conn) {
+                state.players.p1.name = data.name;
+                state.players.p1.conn = conn;
+                conn.send({ type: 'WELCOME', role: 'p1', code: state.roomCode, p1: state.players.p1.name, p2: state.players.p2.name });
+                updateHostLobbySlot('p1');
+            } else if (!state.players.p2.conn) {
+                state.players.p2.name = data.name;
+                state.players.p2.conn = conn;
+                conn.send({ type: 'WELCOME', role: 'p2', code: state.roomCode, p1: state.players.p1.name, p2: state.players.p2.name });
+                updateHostLobbySlot('p2');
+                document.getElementById('btn-host-start-game').disabled = false;
             }
-            broadcastGameState();
-        } else if (data.type === 'PICK_CARD') {
-            if (data.player === gameState.currentTurn) {
-                const cardEl = cardsGrid.children[data.cardIdx];
-                if (cardEl) handleCardPick(data.cardIdx, cardEl);
-                broadcastGameState();
+            broadcastState();
+        } else if (data.type === 'PICK') {
+            if (data.player === state.currentTurn) {
+                doCardPick(data.cardIdx);
+                broadcastState();
             }
-        } else if (data.type === 'SUBMIT_SHOWDOWN') {
-            if (data.player === '1') gameState.showdownChoices.p1 = data.choice;
-            if (data.player === '2') gameState.showdownChoices.p2 = data.choice;
-            
-            document.getElementById('p1-choice-status').textContent = gameState.showdownChoices.p1 ? "تم الاختيار سرياً ✓" : "في انتظار الاختيار...";
-            document.getElementById('p2-choice-status').textContent = gameState.showdownChoices.p2 ? "تم الاختيار سرياً ✓" : "في انتظار الاختيار...";
-
-            if (gameState.showdownChoices.p1 && gameState.showdownChoices.p2) {
-                document.getElementById('btn-host-trigger-final-reveal').disabled = false;
-            }
-            broadcastGameState();
+        } else if (data.type === 'CHOICE') {
+            receiveShowdownChoice(data.player, data.choice);
         }
     }
 
-    function broadcastGameState(customAction = null) {
-        const payload = {
-            type: 'STATE_SYNC',
-            action: customAction,
-            currentTurn: gameState.currentTurn,
-            p1Picks: gameState.players.p1.picks,
-            p2Picks: gameState.players.p2.picks,
-            p1Name: gameState.players.p1.name,
-            p2Name: gameState.players.p2.name,
-            runningPot: gameState.runningPot,
-            selectedCardsOrder: gameState.selectedCardsOrder,
-            currentRevealStageIndex: gameState.currentRevealStageIndex,
-            showdownChoicesReady: { p1: !!gameState.showdownChoices.p1, p2: !!gameState.showdownChoices.p2 }
-        };
-
-        peerConnections.forEach(conn => {
-            if (conn.open) conn.send(payload);
-        });
+    function updateHostLobbySlot(role) {
+        const name = state.players[role].name;
+        document.getElementById(`name-${role}-slot`).textContent = name;
+        const card = document.getElementById(`slot-${role}-card`);
+        card.classList.remove('waiting');
+        card.classList.add('connected');
+        card.querySelector('.note-status').textContent = 'متصل ✓';
+        card.querySelector('.note-status').classList.remove('waiting-dots');
     }
 
-    // TAB 2: Player Join Room
-    document.getElementById('btn-join-room-action').addEventListener('click', () => {
-        playClickSound();
-        const code = document.getElementById('join-room-code-input').value.trim();
-        const name = document.getElementById('join-player-name-input').value.trim() || "لاعب أونلاين";
+    document.getElementById('btn-host-start-game').addEventListener('click', () => {
+        snd.click();
+        initGame();
+        peerConns.forEach(c => c.send({ type: 'START', p1: state.players.p1.name, p2: state.players.p2.name }));
+    });
 
-        if (!code) { showToast("يرجى إدخال كود الغرفة!"); return; }
+    // ══════════════════════════════════════════════════════════════
+    // 7. JOIN ROOM (PLAYER)
+    // ══════════════════════════════════════════════════════════════
+    document.getElementById('btn-join-action').addEventListener('click', () => {
+        snd.click();
+        const code = document.getElementById('join-code-input').value.trim();
+        const name = document.getElementById('join-name-input').value.trim() || 'لاعب';
+        if (!code) { toast('أدخل كود الغرفة!'); return; }
 
-        const statusBanner = document.getElementById('join-status-msg');
-        statusBanner.classList.remove('hidden');
-        statusBanner.textContent = "جاري الاتصال بالغرفة...";
+        const statusBox = document.getElementById('join-status');
+        const statusTxt = document.getElementById('join-status-text');
+        statusBox.style.display = 'flex';
+        statusTxt.textContent = 'جاري الاتصال...';
 
         peer = new Peer();
-
         peer.on('open', () => {
-            const hostPeerId = `sos-room-${code}`;
-            hostConn = peer.connect(hostPeerId);
-
+            hostConn = peer.connect(`sos-vault-${code}`);
             hostConn.on('open', () => {
-                statusBanner.textContent = "تم الاتصال بالهوست! في انتظار بدء المسابقة...";
-                gameState.mode = 'client';
-                hostConn.send({ type: 'JOIN_REQUEST', playerName: name });
+                state.mode = 'client';
+                statusTxt.textContent = 'تم الاتصال! في انتظار الهوست...';
+                hostConn.send({ type: 'JOIN', name });
             });
-
-            hostConn.on('data', (data) => {
-                handleClientReceivedData(data);
-            });
-
-            hostConn.on('error', (err) => {
-                statusBanner.textContent = "فشل الاتصال بالغرفة. التأكد من الكود!";
-            });
+            hostConn.on('data', handleClientData);
+            hostConn.on('error', () => { statusTxt.textContent = 'فشل الاتصال! تأكد من الكود.'; });
         });
     });
 
-    function handleClientReceivedData(data) {
-        if (data.type === 'JOIN_ACCEPTED') {
-            gameState.myRole = data.role;
-            showToast(`تم قبولك في الغرفة كـ (${data.role === 'p1' ? 'المتنافس الأول' : 'المتنافس الثاني'})`);
-        } else if (data.type === 'STATE_SYNC') {
+    function handleClientData(data) {
+        if (data.type === 'WELCOME') {
+            state.myRole = data.role;
+            state.roomCode = data.code;
+            state.players.p1.name = data.p1;
+            state.players.p2.name = data.p2;
+            // Move to client waiting screen
+            goTo('screen-client');
+            document.getElementById('client-room-code').textContent = data.code;
+            const myName = data.role === 'p1' ? data.p1 : data.p2;
+            document.getElementById('client-welcome-name').textContent = myName;
+            document.getElementById('client-role-badge').textContent = data.role === 'p1' ? '١' : '٢';
+            toast(`مرحباً ${myName}! انتظر بدء الهوست`);
+        } else if (data.type === 'START') {
+            state.players.p1.name = data.p1;
+            state.players.p2.name = data.p2;
+            initGame(true); // client mode
+        } else if (data.type === 'STATE') {
             syncClientState(data);
-        } else if (data.type === 'START_GAME') {
-            document.getElementById('disp-p1-name').textContent = data.p1Name;
-            document.getElementById('disp-p2-name').textContent = data.p2Name;
-            render20CardsGrid();
-            updateSelectionStatus();
-            showStep('step-selection');
-        } else if (data.type === 'GOTO_HOST_REVEAL') {
-            prepareHostStage();
-            showStep('step-host-reveal');
+        } else if (data.type === 'GOTO_REVEAL') {
+            prepareRevealStage();
+            goTo('screen-reveal');
+        } else if (data.type === 'REVEAL_CARD') {
+            revealOneCard(data.idx, data.val);
         } else if (data.type === 'GOTO_SHOWDOWN') {
             prepareShowdownStage();
-            showStep('step-showdown');
-        } else if (data.type === 'EXECUTE_FINAL_OUTCOME') {
-            executeFinalOutcome(data.p1Choice, data.p2Choice);
+            goTo('screen-showdown');
+        } else if (data.type === 'FINAL_REVEAL') {
+            executeFinalOutcome(data.c1, data.c2);
         }
     }
 
     function syncClientState(data) {
-        gameState.currentTurn = data.currentTurn;
-        gameState.players.p1.picks = data.p1Picks;
-        gameState.players.p2.picks = data.p2Picks;
-        gameState.players.p1.name = data.p1Name;
-        gameState.players.p2.name = data.p2Name;
-        gameState.runningPot = data.runningPot;
-        gameState.selectedCardsOrder = data.selectedCardsOrder;
-        gameState.currentRevealStageIndex = data.currentRevealStageIndex;
-
-        updateSelectionStatus();
+        state.currentTurn = data.currentTurn;
+        state.players.p1.picks = data.p1Picks;
+        state.players.p2.picks = data.p2Picks;
+        state.runningPot = data.pot;
+        state.selectedOrder = data.order;
+        state.revealIdx = data.revealIdx;
+        // Update client UI
+        updateClientUI();
     }
 
-    // TAB 3: Local Game
-    document.getElementById('btn-start-local-game').addEventListener('click', () => {
-        playClickSound();
-        gameState.mode = 'local';
-        gameState.myRole = 'host';
-
-        const p1Name = document.getElementById('p1-name-local').value.trim() || "المتنافس 1";
-        const p2Name = document.getElementById('p2-name-local').value.trim() || "المتنافس 2";
-
-        gameState.players.p1.name = p1Name;
-        gameState.players.p1.picks = [];
-        gameState.players.p2.name = p2Name;
-        gameState.players.p2.picks = [];
-        gameState.currentTurn = 'p1';
-        gameState.selectedCardsOrder = [];
-        gameState.runningPot = 0;
-
-        document.getElementById('disp-p1-name').textContent = p1Name;
-        document.getElementById('disp-p2-name').textContent = p2Name;
-        document.getElementById('showdown-p1-title').textContent = p1Name;
-        document.getElementById('showdown-p2-title').textContent = p2Name;
-
-        render20CardsGrid();
-        updateSelectionStatus();
-        showStep('step-selection');
-    });
-
-    document.getElementById('btn-host-start-online-game').addEventListener('click', () => {
-        playClickSound();
-        document.getElementById('disp-p1-name').textContent = gameState.players.p1.name;
-        document.getElementById('disp-p2-name').textContent = gameState.players.p2.name;
-        document.getElementById('showdown-p1-title').textContent = gameState.players.p1.name;
-        document.getElementById('showdown-p2-title').textContent = gameState.players.p2.name;
-
-        render20CardsGrid();
-        updateSelectionStatus();
-        showStep('step-selection');
-
-        peerConnections.forEach(conn => conn.send({ type: 'START_GAME', p1Name: gameState.players.p1.name, p2Name: gameState.players.p2.name }));
-    });
-
-    // ==========================================
-    // 6. ADMIN CONTROL PANEL
-    // ==========================================
-    const modalAdmin = document.getElementById('modal-admin');
-    const adminInputsContainer = document.getElementById('admin-cards-inputs-container');
-
-    const savedConfig = localStorage.getItem('split_steal_admin_cards');
-    if (savedConfig) {
-        try { gameState.cardsConfig = JSON.parse(savedConfig); } catch (e) {}
+    function broadcastState() {
+        const payload = {
+            type: 'STATE',
+            currentTurn: state.currentTurn,
+            p1Picks: state.players.p1.picks,
+            p2Picks: state.players.p2.picks,
+            pot: state.runningPot,
+            order: state.selectedOrder,
+            revealIdx: state.revealIdx
+        };
+        peerConns.forEach(c => { if (c.open) c.send(payload); });
     }
 
-    function renderAdminInputs() {
-        adminInputsContainer.innerHTML = '';
-        gameState.cardsConfig.forEach((val, idx) => {
-            const item = document.createElement('div');
-            item.className = 'admin-card-input-item';
-            item.innerHTML = `
-                <label>كارت رقم ${idx + 1}</label>
-                <input type="text" data-card-idx="${idx}" value="${val}">
-            `;
-            adminInputsContainer.appendChild(item);
-        });
-    }
-
-    document.getElementById('btn-admin-modal').addEventListener('click', () => {
-        playClickSound();
-        renderAdminInputs();
-        modalAdmin.classList.add('open');
+    // ══════════════════════════════════════════════════════════════
+    // 8. LOCAL GAME
+    // ══════════════════════════════════════════════════════════════
+    document.getElementById('btn-start-local').addEventListener('click', () => {
+        snd.click();
+        state.mode = 'local';
+        state.myRole = 'host';
+        state.players.p1.name = document.getElementById('local-p1-name').value.trim() || 'المتنافس 1';
+        state.players.p2.name = document.getElementById('local-p2-name').value.trim() || 'المتنافس 2';
+        initGame();
     });
 
-    document.getElementById('btn-close-admin-modal').addEventListener('click', () => {
-        playClickSound();
-        modalAdmin.classList.remove('open');
-    });
+    // ══════════════════════════════════════════════════════════════
+    // 9. GAME INITIALIZATION (STEP 2 — CARD SELECTION)
+    // ══════════════════════════════════════════════════════════════
+    function initGame(isClient = false) {
+        // Reset game state
+        state.players.p1.picks = [];
+        state.players.p2.picks = [];
+        state.selectedOrder = [];
+        state.currentTurn = 'p1';
+        state.runningPot = 0;
+        state.revealIdx = 0;
+        state.showdownChoices = { p1: null, p2: null };
 
-    document.getElementById('btn-save-admin-config').addEventListener('click', () => {
-        playClickSound();
-        const inputs = adminInputsContainer.querySelectorAll('input');
-        const newConfig = [];
-        inputs.forEach(inp => {
-            let val = inp.value.trim();
-            if (!isNaN(val) && val !== '') newConfig.push(Number(val));
-            else newConfig.push(val);
-        });
-        gameState.cardsConfig = newConfig;
-        localStorage.setItem('split_steal_admin_cards', JSON.stringify(newConfig));
-        modalAdmin.classList.remove('open');
-        showToast("تم حفظ قيم الـ 20 كرت بنجاح!");
-    });
-
-    document.getElementById('btn-preset-default').addEventListener('click', () => { playClickSound(); gameState.cardsConfig = [...DEFAULT_CARDS_20]; renderAdminInputs(); });
-    document.getElementById('btn-preset-high-stakes').addEventListener('click', () => {
-        playClickSound();
-        gameState.cardsConfig = [
-            100, 250, 500, 1000, 2500, 
-            "القاتل", 5000, 10000, 500, 1500, 
-            3000, 7500, "القاتل", 15000, 200, 
-            400, 800, 2000, 6000, 12000
-        ];
-        renderAdminInputs();
-    });
-    document.getElementById('btn-preset-randomize').addEventListener('click', () => {
-        playClickSound();
-        gameState.cardsConfig = [...gameState.cardsConfig].sort(() => Math.random() - 0.5);
-        renderAdminInputs();
-    });
-
-    // ==========================================
-    // 7. STEP 2: 20 CARDS SELECTION GRID
-    // ==========================================
-    const cardsGrid = document.getElementById('cards-grid-20');
-
-    function render20CardsGrid() {
-        cardsGrid.innerHTML = '';
-        for (let i = 0; i < 20; i++) {
-            const cardEl = document.createElement('div');
-            cardEl.className = 'card-item';
-            cardEl.dataset.cardIndex = i;
-
-            cardEl.innerHTML = `
-                <div class="card-inner">
-                    <div class="card-front">
-                        <div class="card-pattern">
-                            <i class="fa-solid fa-vault"></i>
-                            <span class="card-num-badge">${i + 1}</span>
-                        </div>
-                    </div>
-                </div>
-            `;
-
-            cardEl.addEventListener('click', () => {
-                if (gameState.mode === 'client') {
-                    if (gameState.myRole === gameState.currentTurn) {
-                        hostConn.send({ type: 'PICK_CARD', cardIdx: i, player: gameState.myRole });
-                    } else {
-                        showToast("ليس دورك الآن للاختيار!");
-                    }
-                } else {
-                    handleCardPick(i, cardEl);
-                }
-            });
-
-            cardsGrid.appendChild(cardEl);
-        }
-    }
-
-    function handleCardPick(cardIdx, cardEl) {
-        if (gameState.players.p1.picks.includes(cardIdx) || gameState.players.p2.picks.includes(cardIdx)) {
-            showToast("هذا الكرت مختار مسبقاً!");
+        if (isClient) {
+            // Client goes to client screen, which updates dynamically
+            goTo('screen-client');
+            updateClientUI();
             return;
         }
 
-        const turn = gameState.currentTurn;
-        if (turn === 'p1') {
-            if (gameState.players.p1.picks.length >= 3) return;
-            gameState.players.p1.picks.push(cardIdx);
-            gameState.selectedCardsOrder.push({ cardIndex: cardIdx, owner: 'p1', val: gameState.cardsConfig[cardIdx] });
-            cardEl.classList.add('picked-p1', 'selected');
-            cardEl.querySelector('.card-front').insertAdjacentHTML('beforeend', `<span class="picked-tag p1">${gameState.players.p1.name}</span>`);
-            playCardSelectSound();
-
-            if (gameState.players.p1.picks.length === 3) gameState.currentTurn = 'p2';
-        } else if (turn === 'p2') {
-            if (gameState.players.p2.picks.length >= 3) return;
-            gameState.players.p2.picks.push(cardIdx);
-            gameState.selectedCardsOrder.push({ cardIndex: cardIdx, owner: 'p2', val: gameState.cardsConfig[cardIdx] });
-            cardEl.classList.add('picked-p2', 'selected');
-            cardEl.querySelector('.card-front').insertAdjacentHTML('beforeend', `<span class="picked-tag p2">${gameState.players.p2.name}</span>`);
-            playCardSelectSound();
-
-            if (gameState.players.p2.picks.length === 3) gameState.currentTurn = 'complete';
-        }
-
-        updateSelectionStatus();
-        if (gameState.mode === 'host') broadcastGameState();
+        // Host/local goes to selection screen
+        buildSelectionScreen();
+        goTo('screen-selection');
     }
 
-    function updateSelectionStatus() {
-        const p1Count = gameState.players.p1.picks.length;
-        const p2Count = gameState.players.p2.picks.length;
+    function buildSelectionScreen() {
+        // Set names in status bar
+        document.getElementById('sel-p1-name').textContent = state.players.p1.name;
+        document.getElementById('sel-p2-name').textContent = state.players.p2.name;
 
-        document.getElementById('p1-picks-count').textContent = `${p1Count}/3`;
-        document.getElementById('p2-picks-count').textContent = `${p2Count}/3`;
-
-        const indP1 = document.getElementById('ind-p1');
-        const indP2 = document.getElementById('ind-p2');
-        const promptText = document.getElementById('turn-prompt-text');
-        const btnProceed = document.getElementById('btn-proceed-to-host-approval');
-
-        if (gameState.currentTurn === 'p1') {
-            indP1.classList.add('active-turn');
-            indP2.classList.remove('active-turn');
-            promptText.innerHTML = `دور <span class="highlight-player" style="color:var(--p1-color)">${gameState.players.p1.name}</span> لاختيار الكرت ${p1Count + 1} من 3`;
-            btnProceed.disabled = true;
-        } else if (gameState.currentTurn === 'p2') {
-            indP1.classList.remove('active-turn');
-            indP2.classList.add('active-turn');
-            promptText.innerHTML = `دور <span class="highlight-player" style="color:var(--p2-color)">${gameState.players.p2.name}</span> لاختيار الكرت ${p2Count + 1} من 3`;
-            btnProceed.disabled = true;
+        // Show room code badge if online
+        const badge = document.getElementById('sel-room-code-badge');
+        if (state.mode === 'host') {
+            badge.textContent = `الغرفة: ${state.roomCode}`;
+            badge.style.display = 'inline-block';
         } else {
-            indP1.classList.remove('active-turn');
-            indP2.classList.remove('active-turn');
-            promptText.innerHTML = `<span class="highlight-player" style="color:var(--gold-bright)">تم اختيار الـ 6 كروت بنجاح! انتقل لمرحلة موافقة الهوست.</span>`;
-            btnProceed.disabled = false;
+            badge.style.display = 'none';
+        }
+
+        render20Cards();
+        updateSelectionUI();
+    }
+
+    function render20Cards() {
+        const grid = document.getElementById('cards-grid-20');
+        grid.innerHTML = '';
+        for (let i = 0; i < 20; i++) {
+            const card = document.createElement('div');
+            card.className = 'vault-card';
+            card.dataset.idx = i;
+            card.style.animationDelay = `${i * 0.02}s`;
+            card.innerHTML = `
+                <span class="card-serial mono">#${String(i+1).padStart(2,'0')}</span>
+                <i class="card-icon fa-solid fa-question"></i>
+                <span class="card-qmarks">؟ ؟ ؟</span>
+                <span class="card-owner-tag"></span>
+            `;
+            card.addEventListener('click', () => onCardClick(i, card));
+            grid.appendChild(card);
         }
     }
 
-    document.getElementById('btn-proceed-to-host-approval').addEventListener('click', () => {
-        playClickSound();
-        prepareHostStage();
-        showStep('step-host-reveal');
-        if (gameState.mode === 'host') peerConnections.forEach(c => c.send({ type: 'GOTO_HOST_REVEAL' }));
+    function onCardClick(idx, cardEl) {
+        // Clients send to host
+        if (state.mode === 'client') {
+            if (state.myRole === state.currentTurn) {
+                hostConn.send({ type: 'PICK', cardIdx: idx, player: state.myRole });
+            } else {
+                toast('ليس دورك الآن!');
+            }
+            return;
+        }
+        doCardPick(idx);
+        if (state.mode === 'host') broadcastState();
+    }
+
+    function doCardPick(idx) {
+        if (state.players.p1.picks.includes(idx) || state.players.p2.picks.includes(idx)) {
+            toast('هذا الكرت مختار مسبقاً!'); return;
+        }
+
+        const turn = state.currentTurn;
+        const p = state.players[turn];
+        if (p.picks.length >= 3) return;
+
+        p.picks.push(idx);
+        state.selectedOrder.push({ cardIdx: idx, owner: turn, val: state.cardsConfig[idx] });
+
+        // Update card visually
+        const cardEl = document.querySelector(`.vault-card[data-idx="${idx}"]`);
+        if (cardEl) {
+            cardEl.classList.add(`picked-${turn}`, 'disabled');
+            cardEl.querySelector('.card-owner-tag').textContent = p.name;
+            snd.pick();
+        }
+
+        // Alternate turn: p1→p2→p1→p2→p1→p2
+        const other = turn === 'p1' ? 'p2' : 'p1';
+        if (state.players[other].picks.length < 3) {
+            state.currentTurn = other;
+        } else if (p.picks.length === 3) {
+            state.currentTurn = 'complete';
+        }
+
+        updateSelectionUI();
+    }
+
+    function updateSelectionUI() {
+        const p1c = state.players.p1.picks.length;
+        const p2c = state.players.p2.picks.length;
+        const total = p1c + p2c;
+
+        document.getElementById('sel-p1-count').textContent = `${p1c}/3`;
+        document.getElementById('sel-p2-count').textContent = `${p2c}/3`;
+
+        const p1Token = document.getElementById('sel-p1-token');
+        const p2Token = document.getElementById('sel-p2-token');
+        const banner  = document.getElementById('turn-banner');
+        const btn     = document.getElementById('btn-proceed-reveal');
+
+        p1Token.classList.toggle('active-turn', state.currentTurn === 'p1');
+        p2Token.classList.toggle('active-turn', state.currentTurn === 'p2');
+
+        if (state.currentTurn === 'complete') {
+            banner.innerHTML = `<span style="color:var(--brass)">✅ تم اختيار الـ 6 كروت! انتقل لمرحلة الكشف</span>`;
+            btn.disabled = false;
+        } else {
+            const curName = state.currentTurn === 'p1' ? state.players.p1.name : state.players.p2.name;
+            const colorVar = state.currentTurn === 'p1' ? 'var(--p1-color)' : 'var(--p2-color)';
+            banner.innerHTML = `الاختيار رقم <strong style="color:var(--brass)">${total + 1}</strong> من 6 — دور <span class="turn-name-highlight" style="color:${colorVar}">${curName}</span>`;
+            btn.disabled = true;
+        }
+    }
+
+    document.getElementById('btn-proceed-reveal').addEventListener('click', () => {
+        snd.click();
+        prepareRevealStage();
+        goTo('screen-reveal');
+        if (state.mode === 'host') peerConns.forEach(c => c.send({ type: 'GOTO_REVEAL' }));
     });
 
-    // ==========================================
-    // 8. STEP 3: HOST SUSPENSE & CARD REVEAL STAGE
-    // ==========================================
-    const selectedCardsStageContainer = document.getElementById('selected-cards-stage-container');
-    const hostStagePotDisp = document.getElementById('host-stage-pot');
-    const killerAlertBanner = document.getElementById('killer-alert-banner');
-    const hostActionStatus = document.getElementById('host-action-status');
-    const btnHostRevealNext = document.getElementById('btn-host-reveal-next');
-    const btnGotoShowdown = document.getElementById('btn-goto-showdown');
+    // ══════════════════════════════════════════════════════════════
+    // 10. CLIENT MOBILE UI UPDATES
+    // ══════════════════════════════════════════════════════════════
+    function updateClientUI() {
+        if (state.mode !== 'client') return;
 
-    function prepareHostStage() {
-        gameState.runningPot = 0;
-        gameState.currentRevealStageIndex = 0;
-        hostStagePotDisp.textContent = "0";
-        killerAlertBanner.classList.add('hidden');
-        btnHostRevealNext.disabled = false;
-        btnHostRevealNext.classList.remove('hidden');
-        btnGotoShowdown.classList.add('hidden');
+        // Hide all sub-areas
+        ['client-waiting-area', 'client-pick-area', 'client-wait-other', 'client-wait-reveal'].forEach(id => {
+            document.getElementById(id).style.display = 'none';
+        });
+        document.getElementById('client-showdown-area').style.display = 'none';
 
-        selectedCardsStageContainer.innerHTML = '';
-        gameState.selectedCardsOrder.forEach((item, idx) => {
-            const ownerName = item.owner === 'p1' ? gameState.players.p1.name : gameState.players.p2.name;
-            const ownerClass = item.owner;
+        const myPicks = state.players[state.myRole].picks.length;
 
-            const box = document.createElement('div');
-            box.className = 'stage-card-box';
-            box.dataset.stageIdx = idx;
-            if (idx === 0) box.classList.add('pending-pulse');
+        if (state.currentTurn === 'complete') {
+            document.getElementById('client-wait-reveal').style.display = 'block';
+        } else if (state.currentTurn === state.myRole && myPicks < 3) {
+            // It's my turn
+            document.getElementById('client-pick-area').style.display = 'block';
+            document.getElementById('client-pick-num').textContent = myPicks + 1;
+            buildMiniCards();
+        } else {
+            document.getElementById('client-wait-other').style.display = 'block';
+        }
+    }
 
-            box.innerHTML = `
-                <div class="stage-card-inner">
-                    <div class="stage-card-front">
-                        <span class="owner-pill ${ownerClass}">${ownerName}</span>
-                        <div class="card-pattern">
-                            <i class="fa-solid fa-question"></i>
-                            <span style="font-size:0.9rem; color:var(--text-muted)">كرت #${idx + 1}</span>
-                        </div>
-                    </div>
-                    <div class="stage-card-back ${String(item.val).includes('القاتل') ? 'is-killer' : ''}">
-                        <span class="owner-pill ${ownerClass}">${ownerName}</span>
-                        <span class="card-val-text">${item.val}</span>
+    function buildMiniCards() {
+        const container = document.getElementById('client-mini-cards');
+        container.innerHTML = '';
+        for (let i = 0; i < 20; i++) {
+            const picked1 = state.players.p1.picks.includes(i);
+            const picked2 = state.players.p2.picks.includes(i);
+            const card = document.createElement('div');
+            card.className = 'mini-vault-card';
+            if (picked1 || picked2) card.classList.add('taken');
+            card.textContent = String(i + 1).padStart(2, '0');
+            if (!picked1 && !picked2) {
+                card.addEventListener('click', () => {
+                    snd.pick();
+                    hostConn.send({ type: 'PICK', cardIdx: i, player: state.myRole });
+                    card.classList.add('picked');
+                });
+            }
+            container.appendChild(card);
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // 11. REVEAL STAGE
+    // ══════════════════════════════════════════════════════════════
+    function prepareRevealStage() {
+        state.revealIdx = 0;
+        state.runningPot = 0;
+        document.getElementById('rev-pot-num').textContent = '0';
+        document.getElementById('killer-alert').style.display = 'none';
+
+        const badge = document.getElementById('rev-room-code-badge');
+        badge.textContent = state.mode === 'host' || state.mode === 'client' ? `الغرفة: ${state.roomCode}` : '';
+        badge.style.display = state.roomCode ? 'inline-block' : 'none';
+
+        // Build 6 stage cards
+        const row = document.getElementById('stage-cards-row');
+        row.innerHTML = '';
+        state.selectedOrder.forEach((item, idx) => {
+            const ownerName = state.players[item.owner].name;
+            const isKiller  = String(item.val).includes('قاتل');
+            const card = document.createElement('div');
+            card.className = `stage-card owner-${item.owner}`;
+            card.dataset.stageIdx = idx;
+            if (idx === 0) card.classList.add('pending');
+            card.innerHTML = `
+                <div class="stage-card-owner">${ownerName}</div>
+                <div class="stage-card-content">
+                    <i class="stage-card-icon fa-solid fa-question"></i>
+                    <div class="stage-card-val ${isKiller ? 'is-killer' : ''}" style="display:none">
+                        ${isKiller ? '<i class="fa-solid fa-skull-crossbones"></i>' : item.val}
                     </div>
                 </div>
+                <div class="stage-card-num mono">#${String(idx+1).padStart(2,'0')}</div>
             `;
-
-            selectedCardsStageContainer.appendChild(box);
+            row.appendChild(card);
         });
 
-        hostActionStatus.textContent = `جاهز لكشف كرت #${1} (${gameState.selectedCardsOrder[0].owner === 'p1' ? gameState.players.p1.name : gameState.players.p2.name})`;
+        // Host dock visibility
+        const isHost = (state.mode === 'host' || state.mode === 'local');
+        document.getElementById('host-dock').style.display = isHost ? 'flex' : 'none';
+
+        document.getElementById('btn-reveal-next').classList.remove('hidden');
+        document.getElementById('btn-goto-showdown').classList.add('hidden');
+        document.getElementById('host-dock-status').textContent = `جاهز لكشف الكرت #1`;
     }
 
-    document.getElementById('btn-host-heartbeat-toggle').addEventListener('click', () => { toggleHeartbeatSound(); });
+    document.getElementById('btn-heartbeat-toggle').addEventListener('click', () => {
+        setHeartbeat(!state.heartbeat);
+    });
 
-    btnHostRevealNext.addEventListener('click', () => {
-        const idx = gameState.currentRevealStageIndex;
-        if (idx >= gameState.selectedCardsOrder.length) return;
+    document.getElementById('btn-reveal-next').addEventListener('click', () => {
+        const idx = state.revealIdx;
+        if (idx >= state.selectedOrder.length) return;
 
-        const currentItem = gameState.selectedCardsOrder[idx];
-        const cardBox = selectedCardsStageContainer.children[idx];
+        const item  = state.selectedOrder[idx];
+        const cards = document.querySelectorAll('.stage-card');
+        const card  = cards[idx];
+        if (!card) return;
 
-        cardBox.classList.remove('pending-pulse');
-        cardBox.classList.add('revealed');
-        playCardFlipSound();
+        card.classList.remove('pending');
+        card.classList.add('revealed');
+        if (String(item.val).includes('قاتل')) card.classList.add('is-killer');
 
-        const cardVal = currentItem.val;
+        // Show value
+        card.querySelector('.stage-card-icon').style.display = 'none';
+        card.querySelector('.stage-card-val').style.display = 'block';
+
+        snd.flip();
 
         setTimeout(() => {
-            if (typeof cardVal === 'number') {
-                gameState.runningPot += cardVal;
-                hostStagePotDisp.textContent = gameState.runningPot.toLocaleString('ar-EG');
-                playPointsGainSound();
-            } else if (String(cardVal).includes('القاتل')) {
-                gameState.runningPot = 0;
-                hostStagePotDisp.textContent = "0";
-                killerAlertBanner.classList.remove('hidden');
-                playKillerExplosionSound();
+            if (typeof item.val === 'number') {
+                state.runningPot += item.val;
+                document.getElementById('rev-pot-num').textContent = state.runningPot.toLocaleString('ar-EG');
+                snd.points();
+            } else if (String(item.val).includes('قاتل')) {
+                state.runningPot = 0;
+                document.getElementById('rev-pot-num').textContent = '0';
+                const alert = document.getElementById('killer-alert');
+                alert.style.display = 'flex';
+                snd.killer();
+                setTimeout(() => alert.style.display = 'none', 3500);
             }
 
-            gameState.currentRevealStageIndex++;
-
-            if (gameState.currentRevealStageIndex < gameState.selectedCardsOrder.length) {
-                const nextItem = gameState.selectedCardsOrder[gameState.currentRevealStageIndex];
-                const nextBox = selectedCardsStageContainer.children[gameState.currentRevealStageIndex];
-                nextBox.classList.add('pending-pulse');
-                const nextOwner = nextItem.owner === 'p1' ? gameState.players.p1.name : gameState.players.p2.name;
-                hostActionStatus.textContent = `جاهز لكشف كرت #${gameState.currentRevealStageIndex + 1} (${nextOwner})`;
+            state.revealIdx++;
+            if (state.revealIdx < state.selectedOrder.length) {
+                const next = cards[state.revealIdx];
+                if (next) next.classList.add('pending');
+                const nextOwner = state.players[state.selectedOrder[state.revealIdx].owner].name;
+                document.getElementById('host-dock-status').textContent = `جاهز لكشف الكرت #${state.revealIdx + 1} (${nextOwner})`;
             } else {
-                toggleHeartbeatSound(false);
-                hostActionStatus.textContent = `تم كشف جميع الكروت الـ 6! الخزنة النهائية = ${gameState.runningPot.toLocaleString('ar-EG')} نقطة`;
-                btnHostRevealNext.classList.add('hidden');
-                btnGotoShowdown.classList.remove('hidden');
+                setHeartbeat(false);
+                document.getElementById('host-dock-status').textContent = `اكتمل الكشف! الخزنة = ${state.runningPot.toLocaleString('ar-EG')} نقطة`;
+                document.getElementById('btn-reveal-next').classList.add('hidden');
+                document.getElementById('btn-goto-showdown').classList.remove('hidden');
             }
 
-            if (gameState.mode === 'host') broadcastGameState();
-        }, 600);
+            // Broadcast to clients
+            if (state.mode === 'host') {
+                peerConns.forEach(c => c.send({ type: 'REVEAL_CARD', idx, val: item.val }));
+                broadcastState();
+            }
+        }, 500);
     });
 
-    btnGotoShowdown.addEventListener('click', () => {
-        playClickSound();
-        prepareShowdownStage();
-        showStep('step-showdown');
-        if (gameState.mode === 'host') peerConnections.forEach(c => c.send({ type: 'GOTO_SHOWDOWN' }));
-    });
+    // Client-side card reveal animation
+    function revealOneCard(idx, val) {
+        const cards = document.querySelectorAll('.stage-card');
+        const card  = cards[idx];
+        if (!card) return;
 
-    // ==========================================
-    // 9. STEP 4: FINAL SHOWDOWN (SPLIT OR STEAL)
-    // ==========================================
-    const finalPotValueDisp = document.getElementById('final-pot-value');
-    const p1ChoiceStatus = document.getElementById('p1-choice-status');
-    const p2ChoiceStatus = document.getElementById('p2-choice-status');
-    const btnTriggerFinalReveal = document.getElementById('btn-host-trigger-final-reveal');
-    const showdownResultBox = document.getElementById('showdown-result-box');
+        card.classList.remove('pending');
+        card.classList.add('revealed');
+        if (String(val).includes('قاتل')) card.classList.add('is-killer');
 
-    function prepareShowdownStage() {
-        finalPotValueDisp.textContent = gameState.runningPot.toLocaleString('ar-EG');
-        gameState.showdownChoices = { p1: null, p2: null };
-
-        p1ChoiceStatus.textContent = "في انتظار الاختيار السري...";
-        p1ChoiceStatus.className = "choice-status-badge";
-        p2ChoiceStatus.textContent = "في انتظار الاختيار السري...";
-        p2ChoiceStatus.className = "choice-status-badge";
-
-        btnTriggerFinalReveal.disabled = true;
-        showdownResultBox.classList.add('hidden');
+        card.querySelector('.stage-card-icon').style.display = 'none';
+        const valEl = card.querySelector('.stage-card-val');
+        valEl.style.display = 'block';
+        if (String(val).includes('قاتل')) {
+            valEl.innerHTML = '<i class="fa-solid fa-skull-crossbones"></i>';
+        } else {
+            valEl.textContent = val;
+        }
     }
 
-    document.querySelectorAll('.btn-choice').forEach(btn => {
+    document.getElementById('btn-goto-showdown').addEventListener('click', () => {
+        snd.click();
+        prepareShowdownStage();
+        goTo('screen-showdown');
+        if (state.mode === 'host') peerConns.forEach(c => c.send({ type: 'GOTO_SHOWDOWN' }));
+    });
+
+    // ══════════════════════════════════════════════════════════════
+    // 12. FINAL SHOWDOWN
+    // ══════════════════════════════════════════════════════════════
+    function prepareShowdownStage() {
+        state.showdownChoices = { p1: null, p2: null };
+        document.getElementById('showdown-pot-num').textContent = state.runningPot.toLocaleString('ar-EG');
+        document.getElementById('showdown-p1-name').textContent = state.players.p1.name;
+        document.getElementById('showdown-p2-name').textContent = state.players.p2.name;
+
+        const b1 = document.getElementById('p1-choice-badge');
+        const b2 = document.getElementById('p2-choice-badge');
+        b1.textContent = 'في انتظار الاختيار السري...';
+        b1.className = 'choice-status-badge';
+        b2.textContent = 'في انتظار الاختيار السري...';
+        b2.className = 'choice-status-badge';
+
+        document.getElementById('btn-trigger-reveal').disabled = true;
+        document.getElementById('result-card').classList.add('hidden');
+        document.getElementById('countdown-num').classList.add('hidden');
+
+        // Show client showdown UI if on phone
+        if (state.mode === 'client') {
+            showClientShowdown();
+        }
+    }
+
+    function showClientShowdown() {
+        ['client-waiting-area','client-pick-area','client-wait-other','client-wait-reveal'].forEach(id => {
+            document.getElementById(id).style.display = 'none';
+        });
+        const area = document.getElementById('client-showdown-area');
+        area.style.display = 'block';
+        document.getElementById('client-showdown-pot').textContent = `الخزنة: ${state.runningPot.toLocaleString('ar-EG')} نقطة`;
+        document.getElementById('client-chose-badge').classList.add('hidden');
+    }
+
+    // Choice buttons (main showdown screen)
+    document.querySelectorAll('.btn-choice-split, .btn-choice-steal').forEach(btn => {
         btn.addEventListener('click', (e) => {
-            playClickSound();
+            snd.click();
             const player = e.currentTarget.dataset.player;
             const choice = e.currentTarget.dataset.choice;
+            if (!player) return; // client btns handled separately
 
-            if (gameState.mode === 'client') {
-                if (gameState.myRole === `p${player}`) {
-                    hostConn.send({ type: 'SUBMIT_SHOWDOWN', player, choice });
-                    showToast("تم إرسال اختيارك السري للهوست بنجاح!");
-                } else {
-                    showToast("يمكنك اختيار زرك الخاص بك فقط من جوالك!");
-                }
+            if (state.mode === 'client') {
+                hostConn.send({ type: 'CHOICE', player: state.myRole, choice });
+                toast('تم إرسال اختيارك السري!');
             } else {
-                if (player === '1') {
-                    gameState.showdownChoices.p1 = choice;
-                    p1ChoiceStatus.textContent = "تم الاختيار سرياً ✓";
-                    p1ChoiceStatus.classList.add('chosen');
-                } else if (player === '2') {
-                    gameState.showdownChoices.p2 = choice;
-                    p2ChoiceStatus.textContent = "تم الاختيار سرياً ✓";
-                    p2ChoiceStatus.classList.add('chosen');
-                }
-
-                if (gameState.showdownChoices.p1 && gameState.showdownChoices.p2) {
-                    btnTriggerFinalReveal.disabled = false;
-                }
+                receiveShowdownChoice(player === '1' ? 'p1' : 'p2', choice);
             }
         });
     });
 
-    btnTriggerFinalReveal.addEventListener('click', () => {
-        playClickSound();
-        btnTriggerFinalReveal.disabled = true;
+    // Client mobile choice buttons
+    ['client-btn-split', 'client-btn-steal'].forEach(id => {
+        const btn = document.getElementById(id);
+        if (!btn) return;
+        btn.addEventListener('click', () => {
+            const choice = id.includes('split') ? 'split' : 'steal';
+            snd.click();
+            hostConn.send({ type: 'CHOICE', player: state.myRole, choice });
+            document.getElementById('client-chose-badge').classList.remove('hidden');
+            btn.parentElement.querySelectorAll('button').forEach(b => b.disabled = true);
+            toast('تم إرسال اختيارك سرياً! ✓');
+        });
+    });
 
-        const countdownNum = document.getElementById('final-countdown-num');
-        countdownNum.classList.remove('hidden');
+    function receiveShowdownChoice(playerRole, choice) {
+        state.showdownChoices[playerRole] = choice;
+        const badge = document.getElementById(`${playerRole}-choice-badge`);
+        badge.textContent = '✓ تم الاختيار سرياً';
+        badge.classList.add('chosen');
+        // Disable that player's buttons
+        const btnsContainer = playerRole === 'p1' ? 'p1-choice-btns' : 'p2-choice-btns';
+        document.getElementById(btnsContainer).querySelectorAll('button').forEach(b => b.disabled = true);
 
-        let count = 3;
-        countdownNum.textContent = count;
-        playTone(500, 0.15, 'sine', 0.2);
+        if (state.showdownChoices.p1 && state.showdownChoices.p2) {
+            document.getElementById('btn-trigger-reveal').disabled = false;
+        }
+    }
+
+    document.getElementById('btn-trigger-reveal').addEventListener('click', () => {
+        snd.click();
+        document.getElementById('btn-trigger-reveal').disabled = true;
+
+        const countEl = document.getElementById('countdown-num');
+        countEl.classList.remove('hidden');
+        let n = 3;
+        countEl.textContent = n;
+        snd.beep();
 
         const timer = setInterval(() => {
-            count--;
-            if (count > 0) {
-                countdownNum.textContent = count;
-                playTone(500, 0.15, 'sine', 0.2);
-            } else {
+            n--;
+            if (n > 0) { countEl.textContent = n; snd.beep(); }
+            else {
                 clearInterval(timer);
-                countdownNum.classList.add('hidden');
-                executeFinalOutcome(gameState.showdownChoices.p1, gameState.showdownChoices.p2);
-                if (gameState.mode === 'host') {
-                    peerConnections.forEach(c => c.send({ type: 'EXECUTE_FINAL_OUTCOME', p1Choice: gameState.showdownChoices.p1, p2Choice: gameState.showdownChoices.p2 }));
+                countEl.classList.add('hidden');
+                const c1 = state.showdownChoices.p1;
+                const c2 = state.showdownChoices.p2;
+                executeFinalOutcome(c1, c2);
+                if (state.mode === 'host') {
+                    peerConns.forEach(c => c.send({ type: 'FINAL_REVEAL', c1, c2 }));
                 }
             }
         }, 1000);
     });
 
     function executeFinalOutcome(c1, c2) {
-        const totalPot = gameState.runningPot;
-        const p1Name = gameState.players.p1.name;
-        const p2Name = gameState.players.p2.name;
-
-        let resHeadline = "";
-        let resSubtext = "";
-        let resP1Score = 0;
-        let resP2Score = 0;
-        let iconClass = "fa-trophy";
+        const pot   = state.runningPot;
+        const p1n   = state.players.p1.name;
+        const p2n   = state.players.p2.name;
+        let headline, subtext, p1score, p2score, icon;
 
         if (c1 === 'split' && c2 === 'split') {
-            resP1Score = Math.floor(totalPot / 2);
-            resP2Score = Math.floor(totalPot / 2);
-            resHeadline = "🤝 اتّفاق ومشاركة عادلة!";
-            resSubtext = `اختار الطرفان "شاركني" وتم تقاسم الـ ${totalPot.toLocaleString('ar-EG')} نقطة بالتساوي!`;
-            iconClass = "fa-handshake";
-            playShowdownFanfareSound();
+            p1score = Math.floor(pot / 2);
+            p2score = Math.floor(pot / 2);
+            headline = '🤝 مشاركة عادلة!';
+            subtext  = `اختار الطرفان "شاركني" — تم تقاسم ${pot.toLocaleString('ar-EG')} نقطة بالتساوي.`;
+            icon = '<i class="fa-solid fa-handshake" style="color:var(--split-color)"></i>';
+            snd.fanfare();
         } else if (c1 === 'steal' && c2 === 'split') {
-            resP1Score = totalPot;
-            resP2Score = 0;
-            resHeadline = `😈 ${p1Name} يستحوذ ويُسقط الخزنة!`;
-            resSubtext = `اختار ${p1Name} "اسرقني" واختار ${p2Name} "شاركني"! السارق أخذ الـ 100% كاملاً.`;
-            iconClass = "fa-mask";
-            playShowdownFanfareSound();
+            p1score = pot; p2score = 0;
+            headline = `😈 ${p1n} يسرق الخزنة!`;
+            subtext  = `${p1n} اختار "اسرقني" و${p2n} اختار "شاركني" — السارق أخذ كل شيء!`;
+            icon = '<i class="fa-solid fa-user-ninja" style="color:var(--steal-color)"></i>';
+            snd.fanfare();
         } else if (c1 === 'split' && c2 === 'steal') {
-            resP1Score = 0;
-            resP2Score = totalPot;
-            resHeadline = `😈 ${p2Name} يستحوذ ويُسقط الخزنة!`;
-            resSubtext = `اختار ${p2Name} "اسرقني" واختار ${p1Name} "شاركني"! السارق أخذ الـ 100% كاملاً.`;
-            iconClass = "fa-mask";
-            playShowdownFanfareSound();
-        } else if (c1 === 'steal' && c2 === 'steal') {
-            resP1Score = 0;
-            resP2Score = 0;
-            resHeadline = "💥 طمع مزدوج وخسارة كليّة!";
-            resSubtext = `اختار الاثنين "اسرقني"! ضاعت الخزنة بالكامل وخرج الطرفان بـ 0 نقطة!`;
-            iconClass = "fa-skull-crossbones";
-            playKillerExplosionSound();
+            p1score = 0; p2score = pot;
+            headline = `😈 ${p2n} يسرق الخزنة!`;
+            subtext  = `${p2n} اختار "اسرقني" و${p1n} اختار "شاركني" — السارق أخذ كل شيء!`;
+            icon = '<i class="fa-solid fa-user-ninja" style="color:var(--steal-color)"></i>';
+            snd.fanfare();
+        } else {
+            p1score = 0; p2score = 0;
+            headline = '💥 طمع مزدوج — خسارة للجميع!';
+            subtext  = 'اختار الاثنان "اسرقني" — ضاعت الخزنة بالكامل!';
+            icon = '<i class="fa-solid fa-skull-crossbones" style="color:var(--steal-color)"></i>';
+            snd.killer();
         }
 
-        document.getElementById('result-icon').innerHTML = `<i class="fa-solid ${iconClass}"></i>`;
-        document.getElementById('result-headline').textContent = resHeadline;
-        document.getElementById('result-subtext').textContent = resSubtext;
+        const result = document.getElementById('result-card');
+        document.getElementById('result-icon').innerHTML = icon;
+        document.getElementById('result-headline').textContent = headline;
+        document.getElementById('result-subtext').textContent = subtext;
 
-        document.getElementById('res-p1-name').textContent = p1Name;
-        document.getElementById('res-p1-choice-text').textContent = c1 === 'split' ? "شاركني (Split)" : "اسرقني (Steal)";
-        document.getElementById('res-p1-score').textContent = `+${resP1Score.toLocaleString('ar-EG')} نقطة`;
+        document.getElementById('res-p1-name').textContent = p1n;
+        document.getElementById('res-p1-choice').textContent = c1 === 'split' ? '🤝 شاركني' : '😈 اسرقني';
+        document.getElementById('res-p1-score').textContent = `+${p1score.toLocaleString('ar-EG')} نقطة`;
 
-        document.getElementById('res-p2-name').textContent = p2Name;
-        document.getElementById('res-p2-choice-text').textContent = c2 === 'split' ? "شاركني (Split)" : "اسرقني (Steal)";
-        document.getElementById('res-p2-score').textContent = `+${resP2Score.toLocaleString('ar-EG')} نقطة`;
+        document.getElementById('res-p2-name').textContent = p2n;
+        document.getElementById('res-p2-choice').textContent = c2 === 'split' ? '🤝 شاركني' : '😈 اسرقني';
+        document.getElementById('res-p2-score').textContent = `+${p2score.toLocaleString('ar-EG')} نقطة`;
 
-        showdownResultBox.classList.remove('hidden');
+        result.classList.remove('hidden');
     }
 
-    document.getElementById('btn-restart-new-game').addEventListener('click', () => {
-        playClickSound();
-        showStep('step-setup');
+    document.getElementById('btn-play-again').addEventListener('click', () => {
+        snd.click();
+        goTo('screen-landing');
     });
 
-});
+    // ══════════════════════════════════════════════════════════════
+    // 13. ADMIN MODAL
+    // ══════════════════════════════════════════════════════════════
+    const savedCfg = localStorage.getItem('sos_vault_cards');
+    if (savedCfg) { try { state.cardsConfig = JSON.parse(savedCfg); } catch(e) {} }
+
+    document.getElementById('btn-open-admin').addEventListener('click', () => {
+        snd.click();
+        renderAdminGrid();
+        document.getElementById('modal-admin').style.display = 'flex';
+    });
+
+    document.getElementById('btn-close-admin').addEventListener('click', () => {
+        document.getElementById('modal-admin').style.display = 'none';
+    });
+
+    document.getElementById('modal-admin').addEventListener('click', (e) => {
+        if (e.target === e.currentTarget) e.currentTarget.style.display = 'none';
+    });
+
+    function renderAdminGrid() {
+        const grid = document.getElementById('admin-cards-grid');
+        grid.innerHTML = '';
+        state.cardsConfig.forEach((val, i) => {
+            const item = document.createElement('div');
+            item.className = 'admin-card-item';
+            item.innerHTML = `
+                <label>كارت ${String(i+1).padStart(2,'0')}</label>
+                <input type="text" data-idx="${i}" value="${val}">
+            `;
+            grid.appendChild(item);
+        });
+    }
+
+    document.getElementById('btn-save-admin').addEventListener('click', () => {
+        snd.click();
+        const inputs = document.querySelectorAll('#admin-cards-grid input');
+        const newCfg = [];
+        inputs.forEach(inp => {
+            const v = inp.value.trim();
+            if (!isNaN(v) && v !== '') newCfg.push(Number(v));
+            else newCfg.push(v);
+        });
+        state.cardsConfig = newCfg;
+        localStorage.setItem('sos_vault_cards', JSON.stringify(newCfg));
+        document.getElementById('modal-admin').style.display = 'none';
+        toast('✅ تم حفظ قيم الكروت!');
+    });
+
+    // Presets
+    document.getElementById('preset-default').addEventListener('click', () => {
+        state.cardsConfig = [...DEFAULT_CARDS]; renderAdminGrid(); toast('تم تحميل التوزيع الافتراضي');
+    });
+
+    document.getElementById('preset-big').addEventListener('click', () => {
+        state.cardsConfig = [100,250,500,1000,2500,'قاتل',5000,10000,500,1500,3000,7500,'قاتل',15000,200,400,800,2000,6000,12000];
+        renderAdminGrid(); toast('تم تحميل إعداد المبالغ الضخمة');
+    });
+
+    document.getElementById('preset-random').addEventListener('click', () => {
+        state.cardsConfig = [...state.cardsConfig].sort(() => Math.random() - 0.5);
+        renderAdminGrid(); toast('تم الخلط العشوائي');
+    });
+
+}); // end DOMContentLoaded
